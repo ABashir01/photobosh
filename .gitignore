@@ -1,0 +1,10 @@
+.pytest_cache/
+.venv/
+backend/generated/
+backend/__pycache__/
+frontend/dist/
+frontend/node_modules/
+frontend/.vite/
+*.pyc
+.env
+
