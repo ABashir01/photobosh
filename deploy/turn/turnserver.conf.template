@@ -1,5 +1,4 @@
 listening-port=${TURN_PORT}
-tls-listening-port=${TURN_TLS_PORT}
 fingerprint
 lt-cred-mech
 user=${TURN_USERNAME}:${TURN_PASSWORD}

@@ -60,7 +60,7 @@ class RoomManager:
                 {
                     "urls": [
                         f"turn:{self.settings.turn_public_host}:{self.settings.turn_port}?transport=udp",
-                        f"turns:{self.settings.turn_public_host}:{self.settings.turn_tls_port}?transport=tcp",
+                        f"turn:{self.settings.turn_public_host}:{self.settings.turn_port}?transport=tcp",
                     ],
                     "username": self.settings.turn_username,
                     "credential": self.settings.turn_password,
