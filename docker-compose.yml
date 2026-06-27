@@ -18,7 +18,7 @@ services:
     env_file:
       - .env
     volumes:
-      - photobosh-generated:${GENERATED_ASSET_DIR:-/app/generated}
+      - photobosh-generated:/app/generated
     expose:
       - "8000"
 
