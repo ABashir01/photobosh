@@ -2,7 +2,6 @@ import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import {
   createRoom,
-  finalizeRoom,
   getRoom,
   joinRoom,
   listBackgrounds,
@@ -11,20 +10,48 @@ import {
   setReady,
   setTemplate,
   startRoom,
+  uploadCompositeShot,
   uploadShot,
 } from "./api";
-import { Lobby } from "./components/Lobby";
-import { WaitingRoom } from "./components/WaitingRoom";
-import { drawCompositePreview, captureTransparentPng, warmUpSegmenters } from "./lib/canvas";
-import { loadSession, saveSession } from "./lib/session";
+import { CaptureScreen } from "./components/CaptureScreen";
+import { CreateRoomScreen } from "./components/CreateRoomScreen";
+import { ThemeSelectionScreen } from "./components/ThemeSelectionScreen";
+import { WaitingLobbyScreen } from "./components/WaitingLobbyScreen";
 import { usePeerConnection } from "./hooks/usePeerConnection";
 import { useRoomSocket } from "./hooks/useRoomSocket";
+import { drawCompositePreview, captureTransparentPng, warmUpSegmenters } from "./lib/canvas";
+import { loadSession, saveSession } from "./lib/session";
 import { appReducer, initialAppState } from "./store";
 import type { BackgroundDefinition, SessionRecord } from "./types";
 
 function getRoomIdFromLocation(): string | null {
   const params = new URLSearchParams(window.location.search);
   return params.get("room");
+}
+
+function getCaptureOverlay(countdownText: string | null): { primary: string | null; secondary: string | null } {
+  if (!countdownText) {
+    return { primary: null, secondary: null };
+  }
+  const secondsMatch = countdownText.match(/in\s+(\d+)/i);
+  if (secondsMatch) {
+    const shotMatch = countdownText.match(/Shot\s+(\d+)/i);
+    return {
+      primary: secondsMatch[1],
+      secondary: shotMatch ? `Shot ${shotMatch[1]} of 4` : null,
+    };
+  }
+  if (countdownText.startsWith("Capturing")) {
+    return { primary: "SNAP", secondary: countdownText.replace("Capturing ", "") };
+  }
+  if (countdownText.startsWith("Uploading")) {
+    return { primary: "UPLOADING", secondary: "Processing your strip" };
+  }
+  const shotMatch = countdownText.match(/Shot\s+(\d+)/i);
+  if (shotMatch) {
+    return { primary: "SMILE", secondary: `Shot ${shotMatch[1]} of 4` };
+  }
+  return { primary: countdownText.toUpperCase(), secondary: null };
 }
 
 export default function App() {
@@ -34,6 +61,7 @@ export default function App() {
   const [rtcConfig, setRtcConfig] = useState<RTCConfiguration | null>(null);
   const [countdownText, setCountdownText] = useState<string | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [inviteFeedback, setInviteFeedback] = useState<string | null>(null);
   const roomId = useMemo(() => getRoomIdFromLocation(), []);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -42,11 +70,26 @@ export default function App() {
   const countdownTimersRef = useRef<number[]>([]);
   const countdownIntervalRef = useRef<number | null>(null);
   const countdownScheduleKeyRef = useRef<string | null>(null);
+  const inviteFeedbackTimerRef = useRef<number | null>(null);
 
   const session = state.session;
   const roomState = state.roomState;
   const isHost = Boolean(session?.hostToken);
   const localParticipant = roomState?.participants.find((participant) => participant.id === session?.participantId) ?? null;
+  const captureOverlay = useMemo(() => getCaptureOverlay(countdownText), [countdownText]);
+  const activeStripUrl = roomState?.finalStripUrl ?? roomState?.previewStripUrl ?? null;
+  const canShareInvite = typeof navigator !== "undefined" && typeof navigator.share === "function";
+
+  function setInviteFeedbackMessage(message: string) {
+    setInviteFeedback(message);
+    if (inviteFeedbackTimerRef.current !== null) {
+      window.clearTimeout(inviteFeedbackTimerRef.current);
+    }
+    inviteFeedbackTimerRef.current = window.setTimeout(() => {
+      setInviteFeedback(null);
+      inviteFeedbackTimerRef.current = null;
+    }, 2200);
+  }
 
   function clearCountdownScheduling() {
     countdownTimersRef.current.forEach((timer) => window.clearTimeout(timer));
@@ -107,14 +150,23 @@ export default function App() {
     if (localStream || !session) {
       return;
     }
-    ensureLocalStream()
-      .then((stream) => {
-        void stream;
-      })
-      .catch((error: Error) => {
-        dispatch({ type: "set-error", payload: error.message });
-      });
+    ensureLocalStream().catch((error: Error) => {
+      dispatch({ type: "set-error", payload: error.message });
+    });
   }, [localStream, session]);
+
+  useEffect(() => {
+    dispatch({ type: "set-ready", payload: localParticipant?.ready ?? false });
+  }, [localParticipant?.ready]);
+
+  useEffect(() => {
+    return () => {
+      clearCountdownScheduling();
+      if (inviteFeedbackTimerRef.current !== null) {
+        window.clearTimeout(inviteFeedbackTimerRef.current);
+      }
+    };
+  }, []);
 
   const signalHandlerRef = useRef<(senderId: string, signal: unknown) => Promise<void>>(async () => undefined);
 
@@ -153,12 +205,6 @@ export default function App() {
       void remoteVideoRef.current.play().catch(() => undefined);
     }
   }, [remoteStream]);
-
-  useEffect(() => {
-    return () => {
-      clearCountdownScheduling();
-    };
-  }, []);
 
   useEffect(() => {
     let animationFrame = 0;
@@ -202,7 +248,7 @@ export default function App() {
     if (!roomState || !session || roomState.phase !== "countdown" || roomState.shotSchedule.length !== 4) {
       clearCountdownScheduling();
       countdownScheduleKeyRef.current = null;
-      if (roomState?.phase === "uploading" || roomState?.phase === "template_selection") {
+      if (roomState?.phase === "uploading") {
         setCountdownText("Uploading shots...");
       } else {
         setCountdownText(null);
@@ -253,8 +299,27 @@ export default function App() {
     if (!roomState || !session || !localVideoRef.current) {
       return;
     }
-    const blob = await captureTransparentPng(localVideoRef.current);
-    await uploadShot(roomState.roomId, session.participantToken, shotIndex, blob);
+    try {
+      if (session.hostToken && previewCanvasRef.current) {
+        const compositeBlob = await new Promise<Blob>((resolve, reject) => {
+          previewCanvasRef.current?.toBlob((blob) => {
+            if (!blob) {
+              reject(new Error("Failed to capture booth frame."));
+              return;
+            }
+            resolve(blob);
+          }, "image/png");
+        });
+        await uploadCompositeShot(roomState.roomId, session.hostToken, shotIndex, compositeBlob);
+      }
+      const blob = await captureTransparentPng(localVideoRef.current);
+      await uploadShot(roomState.roomId, session.participantToken, shotIndex, blob);
+    } catch (error) {
+      dispatch({
+        type: "set-error",
+        payload: error instanceof Error ? error.message : `Shot ${shotIndex + 1} upload failed.`,
+      });
+    }
   }
 
   async function handleCreateRoom() {
@@ -341,70 +406,88 @@ export default function App() {
     await setTemplate(roomState.roomId, session.hostToken, templateId);
   }
 
-  async function handleFinalize() {
-    if (!roomState || !session?.hostToken) {
+  async function handleCopyInvite() {
+    if (!state.joinUrl) {
       return;
     }
-    await finalizeRoom(roomState.roomId, session.hostToken);
+    await navigator.clipboard.writeText(state.joinUrl);
+    setInviteFeedbackMessage("Invite link copied.");
   }
 
-  const shouldShowLobby = !session;
+  async function handleShareInvite() {
+    if (!state.joinUrl || typeof navigator.share !== "function") {
+      return;
+    }
+    try {
+      await navigator.share({
+        title: "Join my Photobosh room",
+        url: state.joinUrl,
+      });
+      setInviteFeedbackMessage("Invite link ready to send.");
+    } catch {
+      // Ignore canceled share sheets.
+    }
+  }
+
+  const shouldShowCreateRoom = !session;
+  const isCapturePhase = roomState?.phase === "countdown" || roomState?.phase === "uploading";
+  const isThemePhase = roomState?.phase === "template_selection" || roomState?.phase === "final_ready";
 
   return (
     <main className="app-shell">
       <video autoPlay muted playsInline ref={localVideoRef} style={{ display: "none" }} />
       <video autoPlay muted playsInline ref={remoteVideoRef} style={{ display: "none" }} />
-      {shouldShowLobby ? (
-        <Lobby
+
+      {shouldShowCreateRoom ? (
+        <CreateRoomScreen
           displayName={displayName}
           isBusy={isBusy}
-          onCreateRoom={handleCreateRoom}
           onDisplayNameChange={setDisplayName}
-          onJoinRoom={handleJoinRoom}
+          onSubmit={roomId ? handleJoinRoom : handleCreateRoom}
           roomId={roomId}
         />
+      ) : roomState ? (
+        isCapturePhase ? (
+          <CaptureScreen
+            boothCanvasRef={previewCanvasRef}
+            overlayPrimary={captureOverlay.primary}
+            overlaySecondary={captureOverlay.secondary}
+          />
+        ) : isThemePhase ? (
+          <ThemeSelectionScreen
+            downloadUrl={activeStripUrl}
+            isHost={isHost}
+            onTemplateSelect={handleTemplateSelect}
+            previewStripUrl={roomState.previewStripUrl ?? activeStripUrl}
+            selectedTemplateId={roomState.selectedTemplateId}
+            templates={state.templates}
+          />
+        ) : (
+          <WaitingLobbyScreen
+            backgrounds={state.backgrounds}
+            boothCanvasRef={previewCanvasRef}
+            canShareInvite={canShareInvite}
+            inviteFeedback={inviteFeedback}
+            isHost={isHost}
+            joinUrl={state.joinUrl}
+            localReady={state.localReady}
+            onBackgroundSelect={handleBackgroundSelect}
+            onCopyInvite={handleCopyInvite}
+            onShareInvite={handleShareInvite}
+            onStart={handleStart}
+            onToggleReady={toggleReady}
+            roomState={roomState}
+          />
+        )
       ) : (
-        <>
-          <section className="stage panel">
-            <div className="panel-header">
-              <div>
-                <p className="eyebrow">Live booth</p>
-                <h2>{countdownText ?? localParticipant?.displayName ?? "Preparing camera"}</h2>
-              </div>
-              <span className="pill pill--info">{roomState?.phase ?? "loading"}</span>
-            </div>
-            <canvas className="stage-canvas" ref={previewCanvasRef} />
-          </section>
-          {roomState ? (
-            <WaitingRoom
-              backgrounds={state.backgrounds}
-              isHost={isHost}
-              joinUrl={state.joinUrl}
-              localReady={state.localReady}
-              onBackgroundSelect={handleBackgroundSelect}
-              onFinalize={handleFinalize}
-              onStart={handleStart}
-              onTemplateSelect={handleTemplateSelect}
-              onToggleReady={toggleReady}
-              roomState={roomState}
-              templates={state.templates}
-            />
-          ) : null}
-          {roomState?.finalStripUrl ? (
-            <section className="panel final-panel">
-              <img alt="Final photostrip" className="strip-preview" src={roomState.finalStripUrl} />
-              <div className="controls-row">
-                <a className="button-link" download href={roomState.finalStripUrl}>
-                  Download strip
-                </a>
-                <button onClick={() => window.print()} type="button">
-                  Print
-                </button>
-              </div>
-            </section>
-          ) : null}
-        </>
+        <section className="screen screen--create">
+          <div className="create-hero">
+            <p className="create-hero__index">...</p>
+            <h1>Loading room…</h1>
+          </div>
+        </section>
       )}
+
       {state.error ? <aside className="error-banner">{state.error}</aside> : null}
     </main>
   );

@@ -110,6 +110,24 @@ export async function uploadShot(
   return parseJson<RoomStateSnapshot>(response);
 }
 
+export async function uploadCompositeShot(
+  roomId: string,
+  hostToken: string,
+  shotIndex: number,
+  file: Blob,
+): Promise<void> {
+  const formData = new FormData();
+  formData.append("file", file, `composite-shot-${shotIndex}.png`);
+  const response = await fetch(`${API_BASE_URL}/api/rooms/${roomId}/composite-shots/${shotIndex}`, {
+    method: "POST",
+    headers: {
+      "X-Host-Token": hostToken,
+    },
+    body: formData,
+  });
+  await parseJson<{ ok: boolean }>(response);
+}
+
 export async function setTemplate(
   roomId: string,
   hostToken: string,
@@ -125,14 +143,3 @@ export async function setTemplate(
   });
   return parseJson<RoomStateSnapshot>(response);
 }
-
-export async function finalizeRoom(roomId: string, hostToken: string): Promise<RoomStateSnapshot> {
-  const response = await fetch(`${API_BASE_URL}/api/rooms/${roomId}/finalize`, {
-    method: "POST",
-    headers: {
-      "X-Host-Token": hostToken,
-    },
-  });
-  return parseJson<RoomStateSnapshot>(response);
-}
-

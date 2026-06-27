@@ -50,7 +50,7 @@ def test_room_start_requires_two_ready_participants(client):
     assert len(started["shotSchedule"]) == 4
 
 
-def test_template_preview_and_finalize(client):
+def test_template_selection_renders_downloadable_strip(client):
     created = client.post("/api/rooms").json()
     host = client.post(
         f"/api/rooms/{created['roomId']}/join",
@@ -85,9 +85,11 @@ def test_template_preview_and_finalize(client):
     selected = client.post(
         f"/api/rooms/{created['roomId']}/template",
         headers={"X-Host-Token": created["hostToken"]},
-        json={"templateId": "midnight-pop"},
+        json={"templateId": "red-panda-lookout"},
     ).json()
     assert selected["previewStripUrl"]
+    assert selected["finalStripUrl"]
+    assert selected["phase"] == "template_selection"
 
     finalized = client.post(
         f"/api/rooms/{created['roomId']}/finalize",
@@ -95,4 +97,3 @@ def test_template_preview_and_finalize(client):
     ).json()
     assert finalized["phase"] == "final_ready"
     assert finalized["finalStripUrl"]
-

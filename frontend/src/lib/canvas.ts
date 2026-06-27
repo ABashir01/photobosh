@@ -4,8 +4,8 @@ import { SEGMENTER_MODEL_URL } from "../config";
 import type { BackgroundDefinition } from "../types";
 
 const PERSON_CLASS_INDEX = 15;
-const PREVIEW_WIDTH = 320;
-const PREVIEW_HEIGHT = 240;
+const PREVIEW_WIDTH = 960;
+const PREVIEW_HEIGHT = 720;
 
 let videoSegmenterPromise: Promise<ImageSegmenter> | null = null;
 let imageSegmenterPromise: Promise<ImageSegmenter> | null = null;

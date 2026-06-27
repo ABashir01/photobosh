@@ -94,6 +94,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict:
         return (await manager.save_shot_upload(room_id, shot_index, x_participant_token, file)).model_dump()
 
+    @app.post("/api/rooms/{room_id}/composite-shots/{shot_index}")
+    async def upload_composite_shot(
+        room_id: str,
+        shot_index: int,
+        file: UploadFile = File(...),
+        x_host_token: str = Header(...),
+    ) -> dict:
+        await manager.save_composite_shot(room_id, shot_index, x_host_token, file)
+        return {"ok": True}
+
     @app.post("/api/rooms/{room_id}/template")
     async def select_template(
         room_id: str,

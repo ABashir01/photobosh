@@ -239,6 +239,7 @@ class RoomManager:
         if len(content) > self.settings.upload_max_mb * 1024 * 1024:
             raise HTTPException(status_code=413, detail="Upload too large.")
 
+        render_template_id: str | None = None
         async with self._lock:
             room = self._require_room(room_id)
             participant = self._participant_by_token(room, participant_token)
@@ -249,15 +250,35 @@ class RoomManager:
             room.uploads_received[participant.id][shot_index] = True
             if all(all(shot_flags) for shot_flags in room.uploads_received.values()):
                 room.phase = "template_selection"
-            elif shot_index == 3:
-                room.phase = "uploading"
+                render_template_id = room.selected_template_id or list_templates()[0]["id"]
             room.expires_at = self._expires_at()
-            snapshot = self._to_snapshot(room)
 
-        if snapshot.phase == "template_selection" and room.selected_template_id is not None:
-            await self._render_preview(room_id, room.selected_template_id)
+        if render_template_id is not None:
+            await self._render_template_outputs(room_id, render_template_id)
         await self.broadcast_room_state(room_id)
         return await self.get_room_snapshot(room_id)
+
+    async def save_composite_shot(
+        self,
+        room_id: str,
+        shot_index: int,
+        host_token: str,
+        upload: UploadFile,
+    ) -> None:
+        if shot_index < 0 or shot_index > 3:
+            raise HTTPException(status_code=400, detail="Invalid shot index.")
+        content = await upload.read()
+        if len(content) > self.settings.upload_max_mb * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Upload too large.")
+        async with self._lock:
+            room = self._require_room(room_id)
+            if host_token != room.host_token:
+                raise HTTPException(status_code=403, detail="Host token required.")
+            room_dir = self._room_dir(room_id) / "composite_shots"
+            room_dir.mkdir(parents=True, exist_ok=True)
+            file_path = room_dir / f"composite_shot_{shot_index}.png"
+            file_path.write_bytes(content)
+            room.expires_at = self._expires_at()
 
     async def update_template(self, room_id: str, host_token: str, template_id: str) -> RoomStateSnapshot:
         async with self._lock:
@@ -266,7 +287,7 @@ class RoomManager:
                 raise HTTPException(status_code=403, detail="Host token required.")
             get_template(template_id)
             room.selected_template_id = template_id
-        await self._render_preview(room_id, template_id)
+        await self._render_template_outputs(room_id, template_id)
         await self.broadcast_room_state(room_id)
         return await self.get_room_snapshot(room_id)
 
@@ -276,7 +297,7 @@ class RoomManager:
             if host_token != room.host_token:
                 raise HTTPException(status_code=403, detail="Host token required.")
             template_id = room.selected_template_id or list_templates()[0]["id"]
-        final_url = await self._render_strip(room_id, template_id, "final")
+        _, final_url = await self._render_template_outputs(room_id, template_id)
         async with self._lock:
             room = self._require_room(room_id)
             room.final_strip_url = final_url
@@ -291,6 +312,15 @@ class RoomManager:
             room.preview_strip_url = preview_url
         return preview_url
 
+    async def _render_template_outputs(self, room_id: str, template_id: str) -> tuple[str, str]:
+        preview_url = await self._render_strip(room_id, template_id, "preview")
+        final_url = await self._render_strip(room_id, template_id, "final")
+        async with self._lock:
+            room = self._require_room(room_id)
+            room.preview_strip_url = preview_url
+            room.final_strip_url = final_url
+        return preview_url, final_url
+
     async def _render_strip(self, room_id: str, template_id: str, variant: str) -> str:
         async with self._lock:
             room = self._require_room(room_id)
@@ -302,8 +332,19 @@ class RoomManager:
                 for participant in participants
                 for shot_index in range(4)
             }
+            composite_paths = {
+                shot_index: self._room_dir(room_id) / "composite_shots" / f"composite_shot_{shot_index}.png"
+                for shot_index in range(4)
+            }
             output_path = self._room_dir(room_id) / f"{variant}_{template_id}.png"
-        render_strip(output_path, background, template, [participant.id for participant in participants], shot_paths)
+        render_strip(
+            output_path,
+            background,
+            template,
+            [participant.id for participant in participants],
+            shot_paths,
+            composite_paths,
+        )
         return f"/generated/{room_id}/{output_path.name}"
 
     async def register_socket(self, room_id: str, participant_token: str, websocket: WebSocket) -> tuple[Room, Participant]:
